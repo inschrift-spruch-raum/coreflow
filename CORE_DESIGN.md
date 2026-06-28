@@ -163,11 +163,8 @@ GraphStore 同时保留历史提交记录和最后一次完整图数据。`graph
       "message": "add review feedback flow",
       "changes": [
         {
-          "flow_in": {
-            "target": "draft",
-            "input": "feedback",
-            "source": "review.comment"
-          }
+          "operation": "flow_in",
+          "draft.feedback": "review.comment"
         }
       ]
     }
