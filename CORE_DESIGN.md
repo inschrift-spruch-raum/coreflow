@@ -122,7 +122,7 @@ Graph 把业务分支逻辑放在 plug 输出的结构化 decision 中。policy 
 
 Plug 声明是注册期事实。实现层可以生成或手写 `Plug` 签名和可序列化调用边界；注册流程把这些声明加入当前运行环境。
 
-运行时只消费已经注册的 Plug 声明、Graph 中的 flow、运行时 Value 和 check 后的 InputBind。字段发现和字段校验基于声明数据完成；kernel 的事实源保持为 Graph、Plug registry、Value 和 GraphResult。
+运行时只消费已经注册的 Plug 声明、Graph 中的 flow、运行时 Value 和 check 后的 InputBind。字段发现和字段校验基于声明数据完成；kernel 的事实源保持为 Graph、runtime plug implementations、Value 和 GraphResult。
 
 本层先定义 graph 文件如何保存声明，再定义运行时 value 如何穿过 plug 边界。存储协议和 Value 协议为 flow、check 和 run 提供共同基础。
 
@@ -287,7 +287,7 @@ Plug 声明分成四个层次。
 
 第一层是注册期声明生成。实现层可以从类型、声明生成 Plug，也可以手写 Plug 声明。
 
-第二层是 Plug registry。它保存当前进程可用的 Plug 声明和实现，检查名字冲突和版本冲突。plug 运行归属 kernel run 阶段。
+第二层是运行时 Plug 实现表。它保存当前进程可用的 Plug 声明和实现，检查名字冲突和版本冲突。plug 运行归属 kernel run 阶段。
 
 第三层是 flow planner。它读取 flow 依赖和用户 selector，生成 InputBind。它负责提前发现缺字段和歧义字段冲突。
 
@@ -546,7 +546,7 @@ Graph 存储包含 plug kind 到 plug name 的映射，以及 flow。typed Rust 
 
 本节只补充实现边界。对象职责归属见 `2. 领域语言`。
 
-`Graph` 的 Runner + Picker 必须具备真正并发能力，并把反馈 flow 的 Idle 行为用测试锁住。因为这直接对应系统核心目的。Graph 存储和 Plug 声明按运行时 Plug registry 设计，把 Rust 编译期能力定位为 Rust 端便利能力。
+`Graph` 的 Runner + Picker 必须具备真正并发能力，并把反馈 flow 的 Idle 行为用测试锁住。因为这直接对应系统核心目的。Graph 存储和 Plug 声明按运行时 Plug 实现表设计，把 Rust 编译期能力定位为 Rust 端便利能力。
 
 #### 3.2 Kernel 的形式化语义
 
