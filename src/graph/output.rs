@@ -127,7 +127,6 @@ pub(crate) struct UnfinishedTick {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UnfinishedTickState {
     BlockedByFailure,
-    Superseded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

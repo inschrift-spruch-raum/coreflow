@@ -9,9 +9,7 @@ pub(crate) struct GraphIndexes {
     pub(crate) reverse_dependencies: BTreeMap<PlugName, Vec<PlugName>>,
 }
 
-pub(crate) fn check_graph(
-    plugs: &BTreeSet<PlugName>, _registry: &BTreeMap<PlugName, crate::Plug>, flow: &Flow,
-) -> CoreResult<GraphIndexes> {
+pub(crate) fn check_graph(plugs: &BTreeSet<PlugName>, flow: &Flow) -> CoreResult<GraphIndexes> {
     let mut indexes = GraphIndexes::default();
 
     for (target, input_map) in &flow.0 {

@@ -1,46 +1,32 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::sync::Mutex;
 
 use crate::{CoreError, CoreResult, Value};
 
 type PlugFuture = Pin<Box<dyn Future<Output = CoreResult<Value>> + Send>>;
-type PlugExecutor = dyn FnMut(Value) -> PlugFuture + Send;
+type PlugExecutor = dyn Fn(Value) -> PlugFuture + Send + Sync;
 
-// Plug 是已挂载到 graph 的可执行节点；实现闭包本身通过 PlugImplementation 共享。
 #[derive(Clone)]
 pub struct Plug {
     pub(crate) name: crate::PlugName,
     implementation: PlugImplementation,
-    serial_gate: Arc<Mutex<()>>,
-}
-
-// PlugExecution 描述执行约束：是否允许同一 plug 重入，以及占用哪个资源并发桶。
-#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PlugExecution {
-    pub reentrant: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource: Option<String>,
 }
 
 #[derive(Clone)]
 pub(crate) struct PlugImplementation {
-    pub(crate) execution: PlugExecution,
     executor: PlugExecutorMode,
 }
 
 impl std::fmt::Debug for PlugImplementation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PlugImplementation")
-            .field("execution", &self.execution)
-            .finish_non_exhaustive()
+        f.debug_struct("PlugImplementation").finish_non_exhaustive()
     }
 }
 
 #[derive(Clone)]
 enum PlugExecutorMode {
-    Serial(Arc<Mutex<Box<PlugExecutor>>>),
+    Functional(Arc<PlugExecutor>),
 }
 
 impl std::fmt::Debug for Plug {
@@ -52,13 +38,11 @@ impl std::fmt::Debug for Plug {
 }
 
 impl Plug {
-    pub(crate) fn implementation<I, O, F, Fut>(
-        execution: PlugExecution, mut function: F,
-    ) -> PlugImplementation
+    pub(crate) fn implementation<I, O, F, Fut>(function: F) -> PlugImplementation
     where
         I: DeserializeOwned + Send + 'static,
         O: Serialize + Send + 'static,
-        F: FnMut(I) -> Fut + Send + 'static,
+        F: Fn(I) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = CoreResult<O>> + Send + 'static,
     {
         let executor = move |value: Value| match serde_json::from_value::<I>(value) {
@@ -81,8 +65,7 @@ impl Plug {
         };
 
         PlugImplementation {
-            execution,
-            executor: PlugExecutorMode::Serial(Arc::new(Mutex::new(Box::new(executor)))),
+            executor: PlugExecutorMode::Functional(Arc::new(executor)),
         }
     }
 
@@ -92,17 +75,7 @@ impl Plug {
         Self {
             name,
             implementation,
-            serial_gate: Arc::new(Mutex::new(())),
         }
-    }
-
-    #[must_use]
-    pub fn execution(&self) -> PlugExecution {
-        self.implementation.execution.clone()
-    }
-
-    pub(crate) fn resource(&self) -> Option<&str> {
-        self.implementation.execution.resource.as_deref()
     }
 
     /// # Errors
@@ -110,17 +83,8 @@ impl Plug {
     /// 当输入无法解码、输出无法编码，或 plug 实现返回错误时返回错误。
     pub async fn call(&self, input: Value) -> CoreResult<Value> {
         match &self.implementation.executor {
-            PlugExecutorMode::Serial(executor) => {
-                // 非 reentrant plug 在自身实例上串行，避免同一个闭包状态被并发改写。
-                let _serial = if self.implementation.execution.reentrant {
-                    None
-                } else {
-                    Some(self.serial_gate.lock().await)
-                };
-                let future = {
-                    let mut executor = executor.lock().await;
-                    (executor)(input)
-                };
+            PlugExecutorMode::Functional(executor) => {
+                let future = (executor)(input);
                 future.await.map_err(|error| match error {
                     CoreError::PlugDecode { plug, message } if plug.is_empty() => {
                         CoreError::PlugDecode {

@@ -94,15 +94,6 @@ impl ExecutionPolicy {
         }
         Ok(self)
     }
-
-    pub(crate) fn from_limits(limits: GraphLimits) -> Self {
-        Self {
-            failure: FailurePolicy::FailFast,
-            max_concurrency: limits.concurrency,
-            resource_limits: BTreeMap::new(),
-            inline_small_plugs: false,
-        }
-    }
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -111,7 +102,13 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 
 impl Default for ExecutionPolicy {
     fn default() -> Self {
-        Self::from_limits(GraphLimits::default())
+        let limits = GraphLimits::default();
+        Self {
+            failure: FailurePolicy::FailFast,
+            max_concurrency: limits.concurrency,
+            resource_limits: BTreeMap::new(),
+            inline_small_plugs: false,
+        }
     }
 }
 
@@ -182,7 +179,6 @@ struct KernelRun<'a> {
     failures: Vec<PlugFailure>,
     failed: bool,
     running_ticks: BTreeMap<TaskId, Tick>,
-    active_resources: BTreeMap<String, usize>,
     inline_completed: Option<(Tick, CoreResult<Value>)>,
 }
 
@@ -225,7 +221,6 @@ impl<'a> KernelRun<'a> {
             failures: Vec::new(),
             failed: false,
             running_ticks: BTreeMap::new(),
-            active_resources: BTreeMap::new(),
             inline_completed: None,
         };
         run.queue_entry_ticks(&initial, seeds, suppressed_entries);
@@ -298,10 +293,6 @@ impl<'a> KernelRun<'a> {
                     name: tick.plug.to_string(),
                 });
             };
-            if self.resource_is_saturated(&plug) {
-                deferred_ticks.push_back(tick);
-                continue;
-            }
             self.record_tick_start(&tick);
             self.start_tick(tick, plug, queued == 1).await;
             started_ticks += 1;
@@ -313,19 +304,6 @@ impl<'a> KernelRun<'a> {
             self.tick_queue.push_front(tick);
         }
         Ok(())
-    }
-
-    fn resource_is_saturated(&self, plug: &Plug) -> bool {
-        plug.resource()
-            .and_then(|resource| {
-                self.policy
-                    .resource_limits
-                    .get(resource)
-                    .map(|limit| (resource, limit))
-            })
-            .is_some_and(|(resource, limit)| {
-                self.active_resources.get(resource).copied().unwrap_or(0) >= *limit
-            })
     }
 
     fn record_tick_start(&mut self, tick: &Tick) {
@@ -354,10 +332,8 @@ impl<'a> KernelRun<'a> {
                 tick: tick.id,
             },
         );
-        self.increment_resource(&plug);
         if only_queued_tick || self.policy.inline_small_plugs {
             let output = call_plug(&plug, &tick).await;
-            self.decrement_resource(&plug);
             self.inline_completed = Some((tick, output));
             return;
         }
@@ -408,11 +384,7 @@ impl<'a> KernelRun<'a> {
         };
         match joined {
             Ok((task_id, joined)) => {
-                if let Some(running_tick) = self.running_ticks.remove(&task_id)
-                    && let Some(plug) = self.plugs.get(&running_tick.plug)
-                {
-                    self.decrement_resource(plug);
-                }
+                let _ = self.running_ticks.remove(&task_id);
                 Ok(Some(joined))
             }
             Err(error) => {
@@ -577,39 +549,16 @@ impl<'a> KernelRun<'a> {
     }
 
     fn queue_tick(&mut self, plug: PlugName, input: Value) -> u64 {
-        let allow_duplicate = self
-            .plugs
-            .get(&plug)
-            .is_some_and(|plug| plug.execution().reentrant);
-        queue_tick(
-            &mut self.tick_queue,
-            &mut self.unfinished_ticks,
-            &mut self.events,
-            &mut self.next_tick,
-            plug,
+        let tick = self.next_tick;
+        self.tick_queue.push_back(Tick {
+            id: tick,
+            plug: plug.clone(),
             input,
-            allow_duplicate,
-        )
-    }
-
-    fn increment_resource(&mut self, plug: &Plug) {
-        if let Some(resource) = plug.resource() {
-            *self
-                .active_resources
-                .entry(resource.to_string())
-                .or_insert(0) += 1;
-        }
-    }
-
-    fn decrement_resource(&mut self, plug: &Plug) {
-        if let Some(resource) = plug.resource()
-            && let Some(active) = self.active_resources.get_mut(resource)
-        {
-            *active = active.saturating_sub(1);
-            if *active == 0 {
-                self.active_resources.remove(resource);
-            }
-        }
+            queued_at: Instant::now(),
+        });
+        self.next_tick += 1;
+        push_event(&mut self.events, RunEvent::TickQueued { plug, tick });
+        tick
     }
 
     fn push_duration(&mut self) {
@@ -658,38 +607,6 @@ fn block_dependents(
             blocked.push_back(target.clone());
         }
     }
-}
-
-fn queue_tick(
-    tick_queue: &mut VecDeque<Tick>, unfinished_ticks: &mut Vec<UnfinishedTick>,
-    events: &mut Vec<RunEvent>, next_tick: &mut u64, plug: PlugName, input: Value,
-    allow_duplicate: bool,
-) -> u64 {
-    if !allow_duplicate {
-        let mut retained = VecDeque::new();
-        while let Some(queued) = tick_queue.pop_front() {
-            if queued.plug == plug {
-                unfinished_ticks.push(UnfinishedTick {
-                    plug: queued.plug,
-                    tick: queued.id,
-                    state: UnfinishedTickState::Superseded,
-                });
-            } else {
-                retained.push_back(queued);
-            }
-        }
-        *tick_queue = retained;
-    }
-    let tick = *next_tick;
-    tick_queue.push_back(Tick {
-        id: tick,
-        plug: plug.clone(),
-        input,
-        queued_at: Instant::now(),
-    });
-    *next_tick += 1;
-    push_event(events, RunEvent::TickQueued { plug, tick });
-    tick
 }
 
 fn push_event(events: &mut Vec<RunEvent>, event: RunEvent) {

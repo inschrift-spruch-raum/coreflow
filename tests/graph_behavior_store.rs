@@ -1,7 +1,4 @@
-use coreflow::{
-    CoreError, ExecutionPolicy, FailurePolicy, Graph, GraphChange, GraphMutationRequest,
-    GraphRunStatus, Run, json,
-};
+use coreflow::{CoreError, ExecutionPolicy, FailurePolicy, Graph, GraphRunStatus, Run, json};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tokio::sync::Barrier;
@@ -106,7 +103,7 @@ async fn graph_store_does_not_persist_execution_policy() {
 }
 
 #[test]
-fn graph_store_into_graph_does_not_carry_runtime_plug_registry() {
+fn graph_store_into_graph_does_not_carry_runtime_plug_table() {
     let mut graph = Graph::new();
 
     graph
@@ -123,12 +120,12 @@ fn graph_store_into_graph_does_not_carry_runtime_plug_registry() {
         CoreError::UnknownPlug {
             name: "echo".to_string()
         },
-        "in-memory GraphStore should be a pure graph-file snapshot, not carry runtime plug registry"
+        "in-memory GraphStore should be a pure graph-file snapshot, not carry runtime plug table"
     );
 }
 
 #[tokio::test]
-async fn graph_flowin_records_one_commit_with_all_field_changes() {
+async fn graph_plain_changes_stage_until_commit_message() {
     let mut graph = Graph::new();
 
     graph
@@ -167,19 +164,38 @@ async fn graph_flowin_records_one_commit_with_all_field_changes() {
 
     assert_eq!(
         commits_after - commits_before,
-        1,
-        "flowin should persist one GraphCommit for the caller-level graph mutation"
+        0,
+        "plain graph changes should stage GraphChange records without creating GraphCommit records"
     );
     assert_eq!(
-        store["commits"]
-            .as_object()
-            .unwrap()
-            .values()
-            .filter(|commit| commit["message"] == "flowin")
-            .map(|commit| commit["changes"].as_array().unwrap().len())
-            .max(),
-        Some(2),
-        "GraphCommit should store every field-level GraphChange under one commit message"
+        store["graph"]["flow"],
+        json!({
+            "target": {
+                "recipient": "source.email",
+                "display_name": "source.name"
+            }
+        }),
+        "plain graph changes should still update the stored working graph"
+    );
+
+    graph.commit("connect email fields").unwrap();
+    let committed = serde_json::to_value(graph.store().unwrap()).unwrap();
+    let commit = committed["commits"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|commit| commit["message"] == "connect email fields")
+        .unwrap();
+
+    assert_eq!(
+        commit["changes"],
+        json!([
+            { "operation": "plug_in", "kind": "source", "name": "source" },
+            { "operation": "plug_in", "kind": "target", "name": "target" },
+            { "operation": "flow_in", "target.display_name": "source.name" },
+            { "operation": "flow_in", "target.recipient": "source.email" }
+        ]),
+        "commit should flush all staged GraphChange records under the caller-provided message"
     );
 }
 
@@ -198,14 +214,11 @@ async fn graph_flowin_commit_records_exact_field_change_shape() {
         .unwrap()
         .plugin("target", "target")
         .unwrap()
-        .commit(GraphMutationRequest {
-            message: "connect recipient".to_string(),
-            changes: vec![GraphChange::FlowIn {
-                target: "target".into(),
-                input: "recipient".into(),
-                source: serde_json::from_value(json!("source.email")).unwrap(),
-            }],
-        })
+        .commit("add plugs")
+        .unwrap()
+        .flowin(json!({ "target": { "recipient": "source.email" } }))
+        .unwrap()
+        .commit("connect recipient")
         .unwrap();
 
     let store = serde_json::to_value(graph.store().unwrap()).unwrap();
@@ -218,7 +231,7 @@ async fn graph_flowin_commit_records_exact_field_change_shape() {
 
     assert_eq!(
         commit["changes"],
-        json!([{ "flow_in": { "target": "target", "input": "recipient", "source": "source.email" } }]),
+        json!([{ "operation": "flow_in", "target.recipient": "source.email" }]),
         "GraphCommit should persist flowin changes under the caller-level commit message"
     );
 }
@@ -240,13 +253,11 @@ async fn graph_flowout_commit_records_exact_field_change_shape() {
         .unwrap()
         .flowin(json!({ "target": { "recipient": "source.email" } }))
         .unwrap()
-        .commit(GraphMutationRequest {
-            message: "remove recipient".to_string(),
-            changes: vec![GraphChange::FlowOut {
-                target: "target".into(),
-                input: "recipient".into(),
-            }],
-        })
+        .commit("connect recipient")
+        .unwrap()
+        .flowout(json!({ "target": ["recipient"] }))
+        .unwrap()
+        .commit("remove recipient")
         .unwrap();
 
     let store = serde_json::to_value(graph.store().unwrap()).unwrap();
@@ -259,7 +270,7 @@ async fn graph_flowout_commit_records_exact_field_change_shape() {
 
     assert_eq!(
         commit["changes"],
-        json!([{ "flow_out": { "target": "target", "input": "recipient" } }]),
+        json!([{ "operation": "flow_out", "target": "target.recipient" }]),
         "GraphCommit should persist flowout changes under the caller-level commit message"
     );
 }
@@ -273,10 +284,11 @@ async fn graph_plugout_commit_records_exact_plug_name_change_shape() {
         .unwrap()
         .plugin("source", "source")
         .unwrap()
-        .commit(GraphMutationRequest {
-            message: "remove source".to_string(),
-            changes: vec![GraphChange::PlugOut("source".into())],
-        })
+        .commit("add source")
+        .unwrap()
+        .plugout("source")
+        .unwrap()
+        .commit("remove source")
         .unwrap();
 
     let store = serde_json::to_value(graph.store().unwrap()).unwrap();
@@ -289,7 +301,7 @@ async fn graph_plugout_commit_records_exact_plug_name_change_shape() {
 
     assert_eq!(
         commit["changes"],
-        json!([{ "plug_out": "source" }]),
+        json!([{ "operation": "plug_out", "name": "source" }]),
         "GraphCommit should persist plugout under the caller-level commit message"
     );
 }
@@ -310,6 +322,8 @@ async fn graph_store_replays_commit_chain_to_current_graph() {
         .plugin("target", "target")
         .unwrap()
         .flowin(json!({ "target": { "recipient": "source.email" } }))
+        .unwrap()
+        .commit("build email graph")
         .unwrap();
 
     let mut store = graph.store().unwrap();
@@ -409,14 +423,9 @@ async fn graph_commit_accepts_explicit_commit_messages() {
         .unwrap()
         .plugin("target", "target")
         .unwrap()
-        .commit(GraphMutationRequest {
-            message: "connect target".to_string(),
-            changes: vec![GraphChange::FlowIn {
-                target: "target".into(),
-                input: "".into(),
-                source: serde_json::from_value(json!("source")).unwrap(),
-            }],
-        })
+        .flowin(json!({ "target": "source" }))
+        .unwrap()
+        .commit("connect target")
         .unwrap();
 
     let store = serde_json::to_value(graph.store().unwrap()).unwrap();

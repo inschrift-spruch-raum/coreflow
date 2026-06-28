@@ -78,12 +78,6 @@ impl Flow {
     ///
     /// 当 flow 声明不是 target-keyed JSON object，selector 形态非法，或字段重复时返回错误。
     pub fn parse(value: impl Borrow<Value>) -> CoreResult<Self> {
-        Self::parse_inner(value, usize::MAX, usize::MAX)
-    }
-
-    fn parse_inner(
-        value: impl Borrow<Value>, max_edges: usize, max_path_depth: usize,
-    ) -> CoreResult<Self> {
         let value = value.borrow();
         // 支持三种声明形态：整值输入、多个上游 fan-in、字段级映射。
         let object = value.as_object().ok_or_else(|| CoreError::InvalidFlow {
@@ -91,23 +85,18 @@ impl Flow {
         })?;
 
         let mut flow = BTreeMap::new();
-        let mut edge_count = 0;
 
         for (target, inputs) in object {
             let mut input_map = BTreeMap::new();
             if let Some(source) = inputs.as_str() {
-                increment_edge_count(&mut edge_count, max_edges)?;
                 let selector = parse_selector(source)?;
-                validate_path_depth(&selector.path, max_path_depth)?;
                 insert_input(target, &mut input_map, FieldPath::new(""), selector)?;
             } else if let Some(sources) = inputs.as_array() {
                 for source in sources {
                     let source = source.as_str().ok_or_else(|| CoreError::InvalidFlow {
                         message: format!("flow target `{target}` sources must be strings"),
                     })?;
-                    increment_edge_count(&mut edge_count, max_edges)?;
                     let selector = parse_selector(source)?;
-                    validate_path_depth(&selector.path, max_path_depth)?;
                     let input = FieldPath::new(selector.plug.to_string());
                     insert_input(target, &mut input_map, input, selector)?;
                 }
@@ -120,11 +109,8 @@ impl Flow {
                     let source = source.as_str().ok_or_else(|| CoreError::InvalidFlow {
                         message: format!("flow `{target}.{input}` source must be a string"),
                     })?;
-                    increment_edge_count(&mut edge_count, max_edges)?;
                     let input = FieldPath::new(input);
-                    validate_path_depth(&input, max_path_depth)?;
                     let selector = parse_selector(source)?;
-                    validate_path_depth(&selector.path, max_path_depth)?;
                     insert_input(target, &mut input_map, input, selector)?;
                 }
             }
@@ -272,17 +258,6 @@ fn insert_input(
         return Err(CoreError::DuplicateFlowInput {
             target: target.to_string(),
             input: input.0,
-        });
-    }
-    Ok(())
-}
-
-fn increment_edge_count(edge_count: &mut usize, max_edges: usize) -> CoreResult<()> {
-    *edge_count += 1;
-    if *edge_count > max_edges {
-        return Err(CoreError::ResourceLimitExceeded {
-            limit: "max_flow_edges".to_string(),
-            value: *edge_count,
         });
     }
     Ok(())

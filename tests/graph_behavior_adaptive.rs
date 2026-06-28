@@ -54,16 +54,13 @@ async fn graph_run_applies_plug_emitted_mutation_requests() {
         })
         .unwrap()
         .plugup("adapt", |_: coreflow::Value| async move {
-            Ok(coreflow::GraphMutationRequest {
-                message: "connect target".to_string(),
-                changes: vec![coreflow::GraphChange::FlowIn {
-                    target: coreflow::PlugName::new("target"),
-                    input: coreflow::FieldPath::new(""),
-                    source: coreflow::SourceSelector {
-                        plug: coreflow::PlugName::new("source"),
-                        path: coreflow::FieldPath::new(""),
-                    },
-                }],
+            Ok(coreflow::GraphChange::FlowIn {
+                target: coreflow::PlugName::new("target"),
+                input: coreflow::FieldPath::new(""),
+                source: coreflow::SourceSelector {
+                    plug: coreflow::PlugName::new("source"),
+                    path: coreflow::FieldPath::new(""),
+                },
             })
         })
         .unwrap()
@@ -90,16 +87,16 @@ async fn graph_run_applies_plug_emitted_mutation_requests() {
         NamedOutput {
             value: "mutated".to_string(),
         },
-        "plug-emitted graph mutation requests should update the graph and rerun against the new checked snapshot"
+        "plug-emitted GraphChange should update the graph and rerun against the new checked snapshot"
     );
     assert_ne!(
         store["head"], store_before["head"],
-        "plug-emitted graph mutation requests should advance the caller graph head"
+        "plug-emitted GraphChange should advance the caller graph head"
     );
     assert_eq!(
         store["commits"].as_object().unwrap().len(),
         commits_before + 1,
-        "runtime-applied mutation requests should append persisted graph commits to the caller graph"
+        "runtime-applied GraphChange should append persisted graph commits to the caller graph"
     );
 
     let rerun = graph
@@ -111,7 +108,7 @@ async fn graph_run_applies_plug_emitted_mutation_requests() {
         NamedOutput {
             value: "mutated".to_string(),
         },
-        "the next run should use the new persisted graph head without re-emitting the mutation request"
+        "the next run should use the new persisted graph head without re-emitting the GraphChange"
     );
 }
 

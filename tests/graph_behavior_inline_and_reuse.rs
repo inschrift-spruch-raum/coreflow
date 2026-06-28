@@ -200,26 +200,24 @@ async fn graph_run_is_the_default_persistent_entrypoint() {
         })
         .unwrap()
         .plugup("adapt", |_: coreflow::Value| async move {
-            Ok(coreflow::GraphMutationRequest {
-                message: "connect source to target".to_string(),
-                changes: vec![
-                    coreflow::GraphChange::PlugIn {
-                        kind: coreflow::PlugKind::new("source"),
-                        name: coreflow::PlugName::new("source"),
-                    },
-                    coreflow::GraphChange::PlugIn {
-                        kind: coreflow::PlugKind::new("target"),
-                        name: coreflow::PlugName::new("target"),
-                    },
-                    coreflow::GraphChange::FlowIn {
-                        target: coreflow::PlugName::new("target"),
-                        input: coreflow::FieldPath::new(""),
-                        source: coreflow::SourceSelector {
-                            plug: coreflow::PlugName::new("source"),
-                            path: coreflow::FieldPath::new(""),
-                        },
-                    },
-                ],
+            let mut next = coreflow::Graph::new();
+            next.plugup("source", |_: coreflow::Value| async move {
+                Ok(NamedOutput {
+                    value: "created".to_string(),
+                })
+            })
+            .unwrap()
+            .plugup("target", |input: NamedOutput| async move { Ok(input) })
+            .unwrap()
+            .plugin("source", "source")
+            .unwrap()
+            .plugin("target", "target")
+            .unwrap()
+            .flowin(json!({ "target": "source" }))
+            .unwrap();
+
+            Ok(coreflow::GraphChange::Replace {
+                graph: Box::new(next),
             })
         })
         .unwrap()

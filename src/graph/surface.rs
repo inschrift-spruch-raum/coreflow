@@ -8,18 +8,14 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use crate::{
-    CoreError, CoreResult, FieldPath, Flow, Plug, PlugExecution, PlugImplementation,
-    SourceSelector, Value,
+    CoreError, CoreResult, FieldPath, Flow, Plug, PlugImplementation, SourceSelector, Value,
     kernel::{ExecutionPolicy, PickerStrategy},
 };
 
 use super::{
     GraphLimits,
     check::{self, GraphIndexes},
-    types::{
-        CommitId, GraphChange, GraphCommit, GraphMutationRequest, GraphStore, PlugKind, PlugName,
-        Run,
-    },
+    types::{CommitId, GraphChange, GraphCommit, GraphStore, PlugKind, PlugName, Run},
 };
 
 impl GraphStore {
@@ -75,17 +71,17 @@ impl GraphStore {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Graph {
-    // plugs/flow 是可存储的声明态；实现、registry、索引和提交游标只属于当前进程。
+    // plugs/flow 是可存储的声明态；实现、索引和提交游标只属于当前进程。
     plugs: BTreeMap<PlugKind, Vec<PlugName>>,
     flow: Flow,
     #[serde(skip)]
     implementations: BTreeMap<PlugKind, PlugImplementation>,
     #[serde(skip)]
-    registry: BTreeMap<PlugName, Plug>,
-    #[serde(skip)]
     head: Option<CommitId>,
     #[serde(skip)]
     commits: BTreeMap<CommitId, GraphCommit>,
+    #[serde(skip)]
+    changes: Vec<GraphChange>,
     #[serde(skip)]
     next_commit: u64,
     #[serde(skip)]
@@ -108,18 +104,6 @@ impl Graph {
     #[must_use]
     pub fn flow(&self) -> &Flow {
         &self.flow
-    }
-
-    /// # Errors
-    ///
-    /// 当 plug 不存在时返回错误。
-    pub fn plug(&self, name: &str) -> CoreResult<PlugExecution> {
-        self.registry
-            .get(&PlugName::new(name))
-            .map(Plug::execution)
-            .ok_or_else(|| CoreError::UnknownPlug {
-                name: name.to_string(),
-            })
     }
 
     fn replay_commits(
@@ -203,36 +187,14 @@ impl Graph {
     where
         I: DeserializeOwned + Send + 'static,
         O: Serialize + Send + 'static,
-        F: FnMut(I) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = CoreResult<O>> + Send + 'static,
-    {
-        self.register_implementation(kind, PlugExecution::default(), function)
-    }
-
-    fn register_implementation<I, O, F, Fut>(
-        &mut self, kind: &str, execution: PlugExecution, function: F,
-    ) -> CoreResult<&mut Self>
-    where
-        I: DeserializeOwned + Send + 'static,
-        O: Serialize + Send + 'static,
-        F: FnMut(I) -> Fut + Send + 'static,
+        F: Fn(I) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = CoreResult<O>> + Send + 'static,
     {
         let kind = PlugKind::new(kind);
         validate_plug_kind(&kind)?;
-        let implementation = Plug::implementation(execution, function);
+        let implementation = Plug::implementation(function);
         self.implementations
             .insert(kind.clone(), implementation.clone());
-
-        if let Some(names) = self.plugs.get(&kind) {
-            for name in names {
-                self.registry.insert(
-                    name.clone(),
-                    Plug::from_implementation(name.clone(), implementation.clone()),
-                );
-            }
-        }
-        self.indexes = None;
         Ok(self)
     }
 
@@ -243,11 +205,7 @@ impl Graph {
         let kind = PlugKind::new(kind);
         let name = PlugName::new(name);
         self.apply_plugin(&kind, &name)?;
-        self.record_changes(
-            format!("plugin {name}"),
-            vec![GraphChange::PlugIn { kind, name }],
-        );
-        self.indexes = None;
+        self.changes.push(GraphChange::PlugIn { kind, name });
         Ok(self)
     }
 
@@ -257,7 +215,7 @@ impl Graph {
     pub fn plugout(&mut self, name: &str) -> CoreResult<&mut Self> {
         let name = PlugName::new(name);
         self.apply_plugout(&name)?;
-        self.record_changes(format!("plugout {name}"), vec![GraphChange::PlugOut(name)]);
+        self.changes.push(GraphChange::PlugOut(name));
         Ok(self)
     }
 
@@ -278,17 +236,15 @@ impl Graph {
         let flow = self.flowin_changes(flow)?;
         self.apply_flowin(flow.clone())?;
         self.indexes = None;
-        let mut changes = Vec::new();
         for (target, inputs) in flow.0 {
             for (input, source) in inputs.0 {
-                changes.push(GraphChange::FlowIn {
+                self.changes.push(GraphChange::FlowIn {
                     target: target.clone(),
                     input,
                     source,
                 });
             }
         }
-        self.record_changes("flowin".to_string(), changes);
         Ok(self)
     }
 
@@ -336,17 +292,13 @@ impl Graph {
         let removed = self.flow.removal_flow(flow)?;
         self.flow.remove(flow)?;
         self.indexes = None;
-        let mut changes = Vec::new();
         for (target, inputs) in removed.0 {
             for input in inputs.0.into_keys() {
-                changes.push(GraphChange::FlowOut {
+                self.changes.push(GraphChange::FlowOut {
                     target: target.clone(),
                     input,
                 });
             }
-        }
-        if !changes.is_empty() {
-            self.record_changes("flowout".to_string(), changes);
         }
         Ok(self)
     }
@@ -354,13 +306,27 @@ impl Graph {
     /// # Errors
     ///
     /// 当提交中的任一 graph change 非法时返回错误。
-    pub fn commit(&mut self, request: GraphMutationRequest) -> CoreResult<&mut Self> {
-        let mut graph = self.clone();
-        for change in &request.changes {
-            graph.apply_change(change)?;
+    pub fn commit(&mut self, message: impl Into<String>) -> CoreResult<&mut Self> {
+        if self.changes.is_empty() {
+            return Ok(self);
         }
-        graph.record_changes(request.message, request.changes);
-        *self = graph;
+        let changes = std::mem::take(&mut self.changes);
+        let next_commit = if self.next_commit == 0 {
+            1
+        } else {
+            self.next_commit
+        };
+        let id = format!("C{next_commit:08}");
+        let commit = GraphCommit {
+            id: id.clone(),
+            parent: self.head.clone(),
+            message: message.into(),
+            changes,
+        };
+        self.commits.insert(id.clone(), commit);
+        self.head = Some(id);
+        self.next_commit = next_commit + 1;
+        self.indexes = None;
         Ok(self)
     }
 
@@ -375,10 +341,10 @@ impl Graph {
     fn build_indexes(&self) -> CoreResult<GraphIndexes> {
         self.limits.check()?;
         let plug_names = self.checked_plug_names()?;
-        for plug in &plug_names {
-            if !self.registry.contains_key(plug) {
+        for kind in self.plugs.keys() {
+            if !self.implementations.contains_key(kind) {
                 return Err(CoreError::UnknownPlug {
-                    name: plug.to_string(),
+                    name: kind.to_string(),
                 });
             }
         }
@@ -391,7 +357,7 @@ impl Graph {
         }
         self.flow
             .check_limits(self.limits.flow_edges, self.limits.path_depth)?;
-        check::check_graph(&plug_names, &self.registry, &self.flow)
+        check::check_graph(&plug_names, &self.flow)
     }
 
     /// # Errors
@@ -416,13 +382,7 @@ impl Graph {
         let mut suppressed_entries = BTreeSet::new();
 
         loop {
-            for plug in working_graph.checked_plug_names()? {
-                if !working_graph.registry.contains_key(&plug) {
-                    return Err(CoreError::UnknownPlug {
-                        name: plug.to_string(),
-                    });
-                }
-            }
+            let runtime_plugs = working_graph.build_runtime_plugs()?;
             let indexes = working_graph
                 .indexes
                 .as_ref()
@@ -432,7 +392,7 @@ impl Graph {
                 .clone()
                 .unwrap_or_else(|| "working-tree".to_string());
             let result = crate::kernel::run_graph(crate::kernel::RunGraphArgs {
-                plugs: &working_graph.registry,
+                plugs: &runtime_plugs,
                 input_binds: &indexes.input_binds,
                 reverse_dependencies: &indexes.reverse_dependencies,
                 suppressed_entries: &suppressed_entries,
@@ -453,9 +413,9 @@ impl Graph {
                 .outputs
                 .iter()
                 .filter_map(|(plug, value)| {
-                    serde_json::from_value::<GraphMutationRequest>(value.clone())
+                    serde_json::from_value::<GraphChange>(value.clone())
                         .ok()
-                        .map(GraphUpdate::MutationRequest)
+                        .map(GraphUpdate::GraphChange)
                         .or_else(|| {
                             serde_json::from_value::<Graph>(value.clone())
                                 .ok()
@@ -488,24 +448,20 @@ impl Graph {
 
     fn apply_graph_update(&mut self, update: &GraphUpdate) -> CoreResult<()> {
         match update {
-            GraphUpdate::MutationRequest(request) => self.apply_mutation_request(request),
-            GraphUpdate::NextGraph(graph) => self.replace_with_graph(graph, "replace graph"),
+            GraphUpdate::GraphChange(change) => {
+                self.apply_change(change)?;
+                self.changes.push(change.clone());
+                self.commit("commit").map(|_| ())
+            }
+            GraphUpdate::NextGraph(graph) => {
+                let change = GraphChange::Replace {
+                    graph: Box::new(graph.storage_snapshot()),
+                };
+                self.apply_change(&change)?;
+                self.changes.push(change);
+                self.commit("replace graph").map(|_| ())
+            }
         }
-    }
-
-    fn apply_mutation_request(&mut self, request: &GraphMutationRequest) -> CoreResult<()> {
-        self.commit(request.clone()).map(|_| ())
-    }
-
-    fn replace_with_graph(&mut self, graph: &Graph, message: impl Into<String>) -> CoreResult<()> {
-        self.apply_replace_graph(graph)?;
-        self.record_changes(
-            message.into(),
-            vec![GraphChange::Replace {
-                graph: Box::new(graph.storage_snapshot()),
-            }],
-        );
-        Ok(())
     }
 
     fn apply_change(&mut self, change: &GraphChange) -> CoreResult<()> {
@@ -559,21 +515,12 @@ impl Graph {
             .entry(kind.clone())
             .or_default()
             .push(name.clone());
-        let Some(implementation) = self.implementations.get(kind).cloned() else {
-            return Err(CoreError::UnknownPlug {
-                name: kind.to_string(),
-            });
-        };
-        self.registry.insert(
-            name.clone(),
-            Plug::from_implementation(name.clone(), implementation),
-        );
         self.indexes = None;
         Ok(())
     }
 
     fn apply_plugout(&mut self, name: &PlugName) -> CoreResult<()> {
-        if !self.registry.contains_key(name) && !self.plug_names().contains(name) {
+        if !self.plug_names().contains(name) {
             return Err(CoreError::UnknownPlug {
                 name: name.to_string(),
             });
@@ -588,7 +535,6 @@ impl Graph {
         for names in self.plugs.values_mut() {
             names.retain(|plug_name| plug_name != name);
         }
-        self.registry.remove(name);
         self.plugs.retain(|_, names| !names.is_empty());
         self.indexes = None;
         Ok(())
@@ -607,26 +553,8 @@ impl Graph {
             .flow
             .check_limits(self.limits.flow_edges, self.limits.path_depth)?;
 
-        let mut registry = BTreeMap::new();
-        for (kind, names) in &graph.plugs {
-            let implementation =
-                self.implementations
-                    .get(kind)
-                    .cloned()
-                    .ok_or_else(|| CoreError::UnknownPlug {
-                        name: kind.to_string(),
-                    })?;
-            for name in names {
-                registry.insert(
-                    name.clone(),
-                    Plug::from_implementation(name.clone(), implementation.clone()),
-                );
-            }
-        }
-
         self.plugs = graph.plugs.clone();
         self.flow = graph.flow.clone();
-        self.registry = registry;
         self.indexes = None;
         Ok(())
     }
@@ -634,11 +562,11 @@ impl Graph {
     fn storage_snapshot(&self) -> Graph {
         let mut graph = self.clone();
         graph.implementations.clear();
-        graph.registry.clear();
         graph.indexes = None;
         graph.limits = GraphLimits::default();
         graph.head = None;
         graph.commits.clear();
+        graph.changes.clear();
         graph.next_commit = 0;
         graph
     }
@@ -699,31 +627,29 @@ impl Graph {
         Ok(seen)
     }
 
-    fn record_changes(&mut self, message: String, changes: Vec<GraphChange>) {
-        if changes.is_empty() {
-            return;
+    fn build_runtime_plugs(&self) -> CoreResult<BTreeMap<PlugName, Plug>> {
+        let mut runtime_plugs = BTreeMap::new();
+        for (kind, names) in &self.plugs {
+            let implementation =
+                self.implementations
+                    .get(kind)
+                    .cloned()
+                    .ok_or_else(|| CoreError::UnknownPlug {
+                        name: kind.to_string(),
+                    })?;
+            for name in names {
+                runtime_plugs.insert(
+                    name.clone(),
+                    Plug::from_implementation(name.clone(), implementation.clone()),
+                );
+            }
         }
-        let next_commit = if self.next_commit == 0 {
-            1
-        } else {
-            self.next_commit
-        };
-        let id = format!("C{next_commit:08}");
-        let commit = GraphCommit {
-            id: id.clone(),
-            parent: self.head.clone(),
-            message,
-            changes,
-        };
-        self.commits.insert(id.clone(), commit);
-        self.head = Some(id);
-        self.next_commit = next_commit + 1;
-        self.indexes = None;
+        Ok(runtime_plugs)
     }
 }
 
 enum GraphUpdate {
-    MutationRequest(GraphMutationRequest),
+    GraphChange(GraphChange),
     NextGraph(Graph),
 }
 

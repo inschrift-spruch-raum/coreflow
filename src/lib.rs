@@ -8,12 +8,9 @@ mod value;
 
 pub use error::{CoreError, CoreResult};
 pub use flow::{FieldPath, Flow, InputBind, InputMap, PlugInput, SourceSelector};
-pub use graph::{
-    CommitId, GraphChange, GraphCommit, GraphMutationRequest, GraphStore, PlugKind, PlugName, Run,
-};
+pub use graph::{CommitId, GraphChange, GraphCommit, GraphStore, PlugKind, PlugName, Run};
 pub use graph::{Graph, GraphOutput, GraphResult, GraphRunStatus, PendingApproval, RunEvent};
 pub use kernel::{ExecutionPolicy, FailurePolicy, PickerStrategy};
-pub(crate) use plug::PlugImplementation;
-pub use plug::{Plug, PlugExecution};
+pub(crate) use plug::{Plug, PlugImplementation};
 pub use serde_json::json;
 pub use value::{JsonValueCodec, Value, ValueCodec};

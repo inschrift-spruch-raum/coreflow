@@ -7,6 +7,4 @@ mod types;
 pub use output::{GraphOutput, GraphResult, GraphRunStatus, PendingApproval, RunEvent};
 pub use surface::Graph;
 pub(crate) use types::GraphLimits;
-pub use types::{
-    CommitId, GraphChange, GraphCommit, GraphMutationRequest, GraphStore, PlugKind, PlugName, Run,
-};
+pub use types::{CommitId, GraphChange, GraphCommit, GraphStore, PlugKind, PlugName, Run};

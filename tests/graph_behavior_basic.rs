@@ -258,8 +258,8 @@ async fn graph_store_serializes_plug_names_and_target_keyed_flow() {
         "GraphStore should persist flow as the target-keyed JSON declaration shape"
     );
     assert!(
-        value["graph"].get("registry").is_none(),
-        "runtime Rust plug registry must not be part of graph file storage"
+        value["graph"].get("runtime_plugs").is_none(),
+        "runtime plug table must not be part of graph file storage"
     );
 }
 

@@ -42,7 +42,6 @@ async fn main() -> coreflow::CoreResult<()> {
 - `Graph::new()`：创建 workflow
 - `plugup(kind, func)`：注册 Rust serde plug 实现
 - `plugin(name, kind)`：把已注册 kind 加入当前 Graph
-- `plug(name)` / `flow()`：查询当前 graph 的 plug 和 flow
 - `flowin(json!(...))`：声明 plug 依赖和字段来源
 - `run(...)`：执行当前 checked graph
 - `result.output().get::<T>(name)`：读取最新稳定输出
