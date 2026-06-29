@@ -87,6 +87,10 @@ graph.flowin(json!({
 - `examples/field_flow.rs`：嵌套字段选择和重命名。
 - `examples/fan_in.rs`：多个上游 plug 组成下游输入。
 - `examples/feedback_timeout.rs`：反馈 flow、timeout fact 和最终收束。
+- `examples/loop_control.rs`：用反馈 flow 表达循环控制。
+- `examples/branch_control.rs`：用 route 字段表达分支控制。
+- `examples/concurrent_execution.rs`：用 `ExecutionPolicy` 展示并发执行。
+- `examples/tool_registry.rs`：用 operation 字符串选择宿主 registry 中的函数。
 
 运行示例：
 
@@ -94,6 +98,10 @@ graph.flowin(json!({
 cargo run --example field_flow
 cargo run --example fan_in
 cargo run --example feedback_timeout
+cargo run --example loop_control
+cargo run --example branch_control
+cargo run --example concurrent_execution
+cargo run --example tool_registry
 ```
 
 ## GraphStore
